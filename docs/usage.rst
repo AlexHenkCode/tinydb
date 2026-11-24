@@ -610,6 +610,54 @@ to the ``table(...)`` function:
    long-running applications that use ``lambda`` functions as a test function
    may experience memory leaks.
 
+.. _unique_constraints:
+
+Unique Constraints
+..................
+
+You can require that a field has a unique value across all documents of a
+table by calling ``add_unique(field)``:
+
+>>> table = db.table('users')
+>>> table.add_unique('email')
+>>> table.insert({'name': 'John', 'email': 'john@example.com'})
+1
+>>> table.insert({'name': 'Jane', 'email': 'john@example.com'})
+ValueError: Unique constraint violated: duplicate value 'john@example.com' for field 'email'
+
+The constraint is checked by all write operations: ``insert``,
+``insert_multiple``, ``update`` (with a mapping or a callable, with a query,
+with ``doc_ids`` or without a filter), ``update_multiple`` and ``upsert``
+(for both the update and the insert case). An operation is checked against
+the table state that would result from it, so it's fine if values are only
+temporarily duplicated while the operation runs (for example when swapping
+two values). If the result contains a duplicate, a ``ValueError`` naming the
+field is raised and the table is left unchanged. This includes batch
+operations: if one document of ``insert_multiple`` conflicts, no document is
+inserted. Removing documents never violates a constraint.
+
+The following rules apply when comparing values:
+
+- Values are compared using Python equality, so ``1`` and ``1.0`` count as
+  duplicates.
+- ``None`` is treated as a regular value: only one document may have
+  ``None`` in the field.
+- Documents that don't contain the field are ignored, so any number of
+  documents may lack it.
+- Unhashable values like lists and dicts are supported.
+
+You can register constraints for multiple fields. Each field is checked on its
+own, and registering the same field twice has no further effect. When
+``add_unique`` is called, the existing documents are checked as well. If they
+already contain duplicates, a ``ValueError`` is raised and the constraint is
+not registered. A ``ValueError`` is also raised if the field name is not a
+non-empty string.
+
+.. hint:: Unique constraints belong to the table object and are not stored
+   in the database. They only apply to writes made through this table object,
+   and after reopening the database you have to register them again by
+   calling ``add_unique``.
+
 Storage & Middleware
 --------------------
 

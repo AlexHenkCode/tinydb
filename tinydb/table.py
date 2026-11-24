@@ -3,8 +3,10 @@ This module implements tables, the central place for accessing and manipulating
 data in TinyDB.
 """
 
+import copy
 from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from typing import (
+    Any,
     NoReturn,
     Optional,
     Union,
@@ -108,6 +110,11 @@ class Table:
             = self.query_cache_class(capacity=cache_size)
 
         self._next_id: Optional[int] = None
+
+        # Fields with a unique constraint (see ``add_unique``). Constraints
+        # belong to this table instance and are not persisted in the storage.
+        self._unique_fields: list[str] = []
+
         # Only persist a brand-new empty table. Never clear existing documents
         # when reopen/construct with persist_empty=True (see issue #636).
         if persist_empty and not self._read_table():
@@ -135,6 +142,44 @@ class Table:
         Get the table storage instance.
         """
         return self._storage
+
+    def add_unique(self, field: str) -> None:
+        """
+        Add a unique constraint for a field.
+
+        After registration, every write operation (``insert``,
+        ``insert_multiple``, ``update``, ``update_multiple`` and ``upsert``)
+        that would result in two documents having equal values in ``field``
+        is rejected with a ``ValueError``. A rejected operation doesn't
+        modify the table.
+
+        Values are compared using Python equality (so ``1`` and ``1.0`` are
+        duplicates). ``None`` is treated as a regular value, documents without
+        the field are ignored, and unhashable values like lists or dicts are
+        supported.
+
+        The constraint belongs to this table instance and is not persisted.
+        After reopening the database, it has to be registered again.
+        Registering the same field multiple times has no further effect.
+
+        :param field: the name of the field that must have unique values
+        :raises ValueError: if ``field`` is not a non-empty string or if the
+                            existing documents already contain duplicate
+                            values for ``field``. In this case the constraint
+                            is not registered.
+        """
+
+        if not isinstance(field, str) or not field:
+            raise ValueError('Unique field must be a non-empty string, '
+                             'got {!r}'.format(field))
+
+        if field in self._unique_fields:
+            return
+
+        # Validate the existing documents before activating the constraint
+        self._check_unique(self._read_table(), [field])
+
+        self._unique_fields.append(field)
 
     def insert(self, document: Mapping) -> int:
         """
@@ -776,6 +821,43 @@ class Table:
 
         return next_id
 
+    @staticmethod
+    def _check_unique(table: Mapping[Any, Mapping], fields: Iterable[str]):
+        """
+        Make sure the documents have no duplicate values in the given fields.
+
+        Documents without a field are ignored. Hashable values are tracked in
+        a set, unhashable values (like lists or dicts) are compared one by one.
+        In both cases Python equality semantics apply.
+
+        :raises ValueError: if a field contains duplicate values
+        """
+
+        for field in fields:
+            hashable_values: set = set()
+            unhashable_values: list = []
+
+            for doc in table.values():
+                if field not in doc:
+                    continue
+
+                value = doc[field]
+
+                try:
+                    is_duplicate = value in hashable_values
+                except TypeError:
+                    # The value is unhashable
+                    is_duplicate = value in unhashable_values
+                    unhashable_values.append(value)
+                else:
+                    hashable_values.add(value)
+
+                if is_duplicate:
+                    raise ValueError(
+                        'Unique constraint violated: duplicate value {!r} '
+                        'for field {!r}'.format(value, field)
+                    )
+
     def _read_table(self) -> dict[str, Mapping]:
         """
         Read the table data from the underlying storage.
@@ -836,8 +918,18 @@ class Table:
             for doc_id, doc in raw_table.items()
         }
 
+        if self._unique_fields:
+            # Some storages (like ``MemoryStorage``) return the stored
+            # documents themselves and updates modify documents in place.
+            # Work on a copy so a write rejected by a unique constraint
+            # leaves the stored data untouched.
+            table = copy.deepcopy(table)
+
         # Perform the table update operation
         updater(table)
+
+        # Validate the resulting table state before anything is written
+        self._check_unique(table, self._unique_fields)
 
         # Convert the document IDs back to strings.
         # This is required as some storages (most notably the JSON file format)

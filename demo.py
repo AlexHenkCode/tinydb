@@ -1,16 +1,19 @@
 from tinydb import TinyDB, Query
 
-db = TinyDB('demo.json')
+db = TinyDB('test.json')
+table = db.table('users')
 
-# Додавання записів
-db.insert({
+table.add_unique('password')
+
+table.insert({
     'username': 'john',
     'password': '12345'
 })
 
-db.insert({
+# Повторне значення має викликати помилку
+table.insert({
     'username': 'alice',
-    'password': '12345'
+    'password': '12345111'
 })
 
 # Читання всіх записів
